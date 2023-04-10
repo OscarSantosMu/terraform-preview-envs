@@ -1,0 +1,271 @@
+name: 'Terraform Prev'
+
+on:
+  push:
+    branches:
+    - prevenvs
+  pull_request:
+    branches:
+    - prevenvs
+
+#Special permissions required for OIDC authentication
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+#These environment variables are used by the terraform azure provider to setup OIDD authenticate. 
+env:
+  ARM_CLIENT_ID: "${{ secrets.AZURE_CLIENT_ID }}"
+  ARM_SUBSCRIPTION_ID: "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+  ARM_TENANT_ID: "${{ secrets.AZURE_TENANT_ID }}"
+
+jobs:
+  terraform-plan:
+    name: 'Terraform Plan'
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    env:
+      #this is needed since we are running terraform with read-only permissions
+      ARM_SKIP_PROVIDER_REGISTRATION: true
+    outputs:
+      tfplanExitCode: ${{ steps.tf-plan.outputs.exitcode }}
+
+    steps:
+    # Checkout the repository to the GitHub Actions runner
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    # Install the latest version of the Terraform CLI
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_wrapper: false
+
+    # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
+    - name: Terraform Init
+      run: terraform init
+
+    # Checks that all Terraform configuration files adhere to a canonical format
+    # Will fail the build if not
+    - name: Terraform Format
+      run: terraform fmt -check
+
+    # Generates an execution plan for Terraform
+    # An exit code of 0 indicated no changes, 1 a terraform failure, 2 there are pending changes.
+    - name: Terraform Plan
+      id: tf-plan
+      run: |
+        export exitcode=0
+        terraform plan -detailed-exitcode -no-color -out tfplan || export exitcode=$?
+
+        echo "exitcode=$exitcode" >> $GITHUB_OUTPUT
+        
+        if [ $exitcode -eq 1 ]; then
+          echo Terraform Plan Failed!
+          exit 1
+        else 
+          exit 0
+        fi
+        
+    # Save plan to artifacts  
+    - name: Publish Terraform Plan
+      uses: actions/upload-artifact@v3
+      with:
+        name: tfplan
+        path: tfplan
+        
+    # Create string output of Terraform Plan
+    - name: Create String Output
+      id: tf-plan-string
+      run: |
+        TERRAFORM_PLAN=$(terraform show -no-color tfplan)
+        
+        delimiter="$(openssl rand -hex 8)"
+        echo "summary<<${delimiter}" >> $GITHUB_OUTPUT
+        echo "## Terraform Plan Output" >> $GITHUB_OUTPUT
+        echo "<details><summary>Click to expand</summary>" >> $GITHUB_OUTPUT
+        echo "" >> $GITHUB_OUTPUT
+        echo '```terraform' >> $GITHUB_OUTPUT
+        echo "$TERRAFORM_PLAN" >> $GITHUB_OUTPUT
+        echo '```' >> $GITHUB_OUTPUT
+        echo "</details>" >> $GITHUB_OUTPUT
+        echo "${delimiter}" >> $GITHUB_OUTPUT
+        
+    # Publish Terraform Plan as task summary
+    - name: Publish Terraform Plan to Task Summary
+      env:
+        SUMMARY: ${{ steps.tf-plan-string.outputs.summary }}
+      run: |
+        echo "$SUMMARY" >> $GITHUB_STEP_SUMMARY
+      
+    # If this is a PR post the changes
+    - name: Push Terraform Output to PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      env:
+        SUMMARY: "${{ steps.tf-plan-string.outputs.summary }}"
+      with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const body = `${process.env.SUMMARY}`;
+            github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body
+            })
+                
+  terraform-apply:
+    name: 'Terraform Apply'
+    if: github.event_name == 'pull_request' && needs.terraform-plan.outputs.tfplanExitCode == 2
+    runs-on: ubuntu-latest
+    environment: staging
+    needs: [terraform-plan]
+    outputs:
+      tfapplyExitCode: ${{ steps.tf-apply.outputs.exitcodeapply }}
+      vm_ip: ${{ steps.save-output-values.outputs.vm_ip }}
+    
+    steps:
+    # Checkout the repository to the GitHub Actions runner
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_wrapper: false
+
+    # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
+    - name: Terraform Init
+      run: terraform init
+
+    # Download saved plan from artifacts  
+    - name: Download Terraform Plan
+      uses: actions/download-artifact@v3
+      with:
+        name: tfplan
+
+    # Terraform Apply
+    - name: Terraform Apply
+      id: tf-apply
+      run: |
+        export exitcodeapply=0
+        terraform apply -auto-approve tfplan || export exitcodeapply=$?
+        
+        echo "exitcodeapply=$exitcodeapply" >> $GITHUB_OUTPUT
+
+        if [ $exitcodeapply -eq 1 ]; then
+          echo Terraform Apply Failed!
+          exit 1
+        else 
+          exit 0
+        fi
+
+    # Save output values to a file
+    - name: Save IP to output
+      id: save-output-values
+      run: |
+        VM_IP=$(terraform output -raw public_ip_address)
+        echo "vm_ip=$VM_IP" >> $GITHUB_OUTPUT
+
+    # Save private key to local ssh directory
+    - name: Save Private Key from Terraform output
+      run: |
+        mkdir -p ~/.ssh
+        terraform output -raw tls_private_key > ~/.ssh/tfdeployment_rsa
+
+    # Upload output file as artifact
+    - name: Upload output artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: tfdeployment_rsa
+        path: ~/.ssh/tfdeployment_rsa
+
+  terraform-destroy:
+    name: 'Terraform Destroy'
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    environment: staging
+
+    steps:
+    # Checkout the repository to the GitHub Actions runner
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+
+    # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
+    - name: Terraform Init
+      run: terraform init
+
+    # Generates an execution plan for Terraform
+    # An exit code of 0 indicated no changes, 1 a terraform failure, 2 there are pending changes.
+    - name: Terraform Plan
+      id: tf-plan-destroy
+      run: |
+        export exitcode=0
+        terraform plan -detailed-exitcode -no-color -destroy -out destroytfplan || export exitcode=$?
+
+        echo "exitcode=$exitcode" >> $GITHUB_OUTPUT
+        
+        if [ $exitcode -eq 1 ]; then
+          echo Terraform Plan Failed!
+          exit 1
+        else 
+          exit 0
+        fi
+
+    # Terraform Apply
+    - name: Terraform Apply
+      run: terraform apply -auto-approve destroytfplan
+
+  connect-to-vm:
+    name: 'Connect to VM'
+    runs-on: ubuntu-latest
+    needs: [terraform-apply]
+
+    steps:
+      # Download output artifact
+      - name: Download output artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: tfdeployment_rsa
+
+      # Move tfdeployment_rsa to ~/.ssh directory
+      - name: Move key to ~/.ssh and change permissions
+        run: |
+          mkdir -p ~/.ssh
+          mv tfdeployment_rsa ~/.ssh/
+          chmod 600 ~/.ssh/tfdeployment_rsa
+
+      - name: Accept remote host key
+        run: ssh-keyscan -H ${{ needs.terraform-apply.outputs.vm_ip }} >> ~/.ssh/known_hosts
+
+      - name: Get VM specs
+        run: |
+          ssh -o "StrictHostKeyChecking=no" -i ~/.ssh/tfdeployment_rsa ${{ secrets.SSH_USER }}@${{ needs.terraform-apply.outputs.vm_ip }} 'cat /etc/os-release' || exit 1
+
+      # Checkout the repository to the GitHub Actions runner
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Copy script to VM
+        run: |
+          scp -o "StrictHostKeyChecking=no" -i ~/.ssh/tfdeployment_rsa deploy-to-vm.sh ${{ secrets.SSH_USER }}@${{ needs.terraform-apply.outputs.vm_ip }}:~/ || exit 1
+          ssh -o "StrictHostKeyChecking=no" -i ~/.ssh/tfdeployment_rsa ${{ secrets.SSH_USER }}@${{ needs.terraform-apply.outputs.vm_ip }} 'ls -la | grep deploy-to-vm.sh' || exit 1
+
+      # Run script to deploy an app to the VM
+      - name: Run script
+        run: |
+          ssh -o "StrictHostKeyChecking=no" -i ~/.ssh/tfdeployment_rsa ${{ secrets.SSH_USER }}@${{ needs.terraform-apply.outputs.vm_ip }} 'chmod +x ~/deploy-to-vm.sh && ~/deploy-to-vm.sh' || exit 1
+          while ! ssh -o "StrictHostKeyChecking=no" -i ~/.ssh/tfdeployment_rsa ${{ secrets.SSH_USER }}@${{ needs.terraform-apply.outputs.vm_ip }} 'sudo docker ps --format "${{ '{{.Names}}' }}" | grep -q "proxy"'; do
+            sleep 5
+          done
+
+      - name: Test Deployed changes
+        run: |
+          curl http://${{ needs.terraform-apply.outputs.vm_ip }}
