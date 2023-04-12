@@ -20,6 +20,7 @@ sudo sh get-docker.sh
 
 # Clone demo app and cd to a folder with a compose.yaml
 git clone https://github.com/OscarSantosMu/terraform-preview-envs.git
+git checkout 3-add-more-posts
 cd terraform-preview-envs/src/ || exit 1
 
 # Start docker engine with systemd
