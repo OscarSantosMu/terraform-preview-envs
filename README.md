@@ -7,8 +7,11 @@ This repository contains infrastructure as code written in Terraform that create
 ## Workflows
 
 tf-unit-tests.yml: Runs unit tests for Terraform code and creates code scanning reports.
+
 tf-drift.yml: Detects drifts between Terraform configuration and the actual state of the cloud resources, then creates issue.
+
 tf-plan-apply.yml: Applies the Terraform changes in the cloud production environment.
+
 **tf-prev.yml**: Creates a preview environment for a pull request, allowing changes to be tested before they are merged.
 
 ## Getting started
@@ -23,7 +26,16 @@ tf-plan-apply.yml: Applies the Terraform changes in the cloud production environ
 8. Register them as GitHub secrets and separating Client Id on environment secrets.
 9. Create a branch called prevenvs
 10. Create a branch with your feature and make a pr. Compare it with prevenvs.
-11. Once deployed and success on the checks. Merge the pull request and check the ephemeral environments has gone.
+11. A GitHub Action workflow will be triggered
+
+![](static/img/pr%20deploy%20staging.png)
+
+![](static/img/ephemeral%20staging.png)
+
+12. Once deployed and success on the checks. Merge the pull request and check the ephemeral environments has gone.
+
+![](static/img/resource%20groups%20after%20pr%20merge.png)
+
 
 ## Contributing
 
